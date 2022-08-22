@@ -8,6 +8,8 @@ from google.protobuf import text_format
 
 from brax.io import image
 
+import numpy as np
+
 import gym
 from gym import spaces
 
@@ -121,7 +123,7 @@ class BipedalWalker(env.Env):
     }
 
     def __init__(self,
-                hardcore: bool = False
+                hardcore: bool = False,
                 **kwargs):
         hardcore = hardcore
         config = _SYSTEM_CONFIG(self._generate_terrain(hardcore))
@@ -222,7 +224,7 @@ class BipedalWalker(env.Env):
         joint_angle += [0, 1, 0, 1]
         joint_vel /= jp.array([6, 4, 6, 4])
 
-        #hull_velocity = self._to_2d(0.3 * qp.vel[HULL])
+        hull_velocity = self._to_2d(0.3 * qp.vel[HULL])
 
         obs = [
             self._get_angle(self.qp.rot[HULL]),
@@ -241,25 +243,25 @@ class BipedalWalker(env.Env):
             *self._get_lidar(),
         ]
 
-        # state = {
-        #     "hull_rot": self._get_angle(qp.rot[HULL]),
-        #     "hull_something_else": qp.ang[HULL][1] / 200,
-        #     "hull_x_velocity": hull_velocity[0], # Note sure if it is xy or yx
-        #     "hull_y_velocity": hull_velocity[1], # Note sure if it is xy or yx
-        #     "left_hip_joint_angle": joint_angle[LEFT_HIP],
-        #     "left_hip_joint_velocity": joint_vel[LEFT_HIP],
-        #     "left_knee_joint_angle": joint_angle[LEFT_KNEE],
-        #     "left_knee_joint_velocity": joint_vel[LEFT_KNEE],
-        #     "left_leg_ground_contact": left_leg_ground_contact,
-        #     "right_hip_joint_angle": joint_angle[RIGHT_HIP],
-        #     "right_hip_joint_velocity": joint_vel[RIGHT_HIP],
-        #     "right_knee_joint_angle": joint_angle[RIGHT_KNEE],
-        #     "right_knee_joint_velocity": joint_vel[RIGHT_KNEE],
-        #     "right_leg_ground_contact": right_leg_ground_contact,
-        #     "lidar_intersects": self._get_lidar(qp),
-        # }
+        metrics = {
+            "hull_rot": self._get_angle(qp.rot[HULL]),
+            "hull_something_else": qp.ang[HULL][1] / 200,
+            "hull_x_velocity": hull_velocity[0], # Note sure if it is xy or yx
+            "hull_y_velocity": hull_velocity[1], # Note sure if it is xy or yx
+            "left_hip_joint_angle": joint_angle[LEFT_HIP],
+            "left_hip_joint_velocity": joint_vel[LEFT_HIP],
+            "left_knee_joint_angle": joint_angle[LEFT_KNEE],
+            "left_knee_joint_velocity": joint_vel[LEFT_KNEE],
+            "left_leg_ground_contact": left_leg_ground_contact,
+            "right_hip_joint_angle": joint_angle[RIGHT_HIP],
+            "right_hip_joint_velocity": joint_vel[RIGHT_HIP],
+            "right_knee_joint_angle": joint_angle[RIGHT_KNEE],
+            "right_knee_joint_velocity": joint_vel[RIGHT_KNEE],
+            "right_leg_ground_contact": right_leg_ground_contact,
+            "lidar_intersects": self._get_lidar(qp),
+        }
         assert len(obs) == 24
-        return obs
+        return obs, metrics
 
     def _generate_terrain(self, hardcore):
         terrain_x = jp.linspace(
@@ -306,7 +308,7 @@ class BipedalWalker(env.Env):
 
         env_info["system_info"] = info
 
-        obs = self._get_obs(qp, info)
+        obs, metrics = self._get_obs(qp, info)
         reward, done, zero = jp.zeros(3)
 
         env_state = env.State(
@@ -314,7 +316,7 @@ class BipedalWalker(env.Env):
             obs,
             reward,
             done,
-            ?????,
+            metrics,
             env_info
         )
 
@@ -335,7 +337,7 @@ class BipedalWalker(env.Env):
             "system_info": info
         }
 
-        obs = self._get_obs(env_info)
+        obs, metrics = self._get_obs(env_info)
 
         shaping = (
             3.5 * self.qp.pos[HULL][0]
@@ -365,7 +367,7 @@ class BipedalWalker(env.Env):
             obs,
             reward,
             done,
-            ????,
+            metrics,
             info
         )
 

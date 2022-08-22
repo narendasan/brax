@@ -37,6 +37,7 @@ from brax.envs import swimmer
 from brax.envs import ur5e
 from brax.envs import walker2d
 from brax.envs import wrappers
+from brax.envs import bipedalwalker_v3
 from brax.envs.env import Env, State, Wrapper
 import gym
 
@@ -59,6 +60,7 @@ _envs = {
     'swimmer': swimmer.Swimmer,
     'ur5e': ur5e.Ur5e,
     'walker2d': walker2d.Walker2d,
+    "bipedialwalker_v3": bipedalwalker_v3.BipedalWalker,
 }
 
 
@@ -78,6 +80,7 @@ def create(env_name: str,
            eval_metrics: bool = False,
            **kwargs) -> Env:
   """Creates an Env with a specified brax system."""
+  print(_envs)
   env = _envs[env_name](**kwargs)
   if episode_length is not None:
     env = wrappers.EpisodeWrapper(env, episode_length, action_repeat)
