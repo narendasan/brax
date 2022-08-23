@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, Tuple, Dict
 
 import brax
 from brax import jumpy as jp
@@ -9,6 +9,8 @@ from google.protobuf import text_format
 from brax.io import image
 
 import numpy as np
+import jax
+from jax import numpy as jnp
 
 import gym
 from gym import spaces
@@ -126,7 +128,10 @@ class BipedalWalker(env.Env):
                 hardcore: bool = False,
                 **kwargs):
         hardcore = hardcore
-        config = _SYSTEM_CONFIG(self._generate_terrain(hardcore))
+        terrain_x, terrain_y, terrain_points, terrain_map = self._generate_terrain(jp.random_prngkey(seed=0), hardcore)
+        config = _SYSTEM_CONFIG(terrain_map)
+        with open('sys_conf.pbtxt', 'w') as f:
+            f.write(config)
         super().__init__(config=config, **kwargs)
 
         self.hardcore = hardcore
@@ -194,18 +199,18 @@ class BipedalWalker(env.Env):
         directions = jp.array(
             [[jp.sin(1.5 * i / 10.0), -jp.cos(1.5 * i / 10.0)] for i in range(10)]
         )
-        p1 = env_info.terrain_points[:-1]
-        p2 = env_info.terrain_points[1:]
+        p1 = env_info["terrain_points"][:-1]
+        p2 = env_info["terrain_points"][1:]
         v1 = hull_pos - p1
         v2 = p2 - p1
         v3 = jp.array([-directions.T[1], directions.T[0]]).T
         distances = jp.cross(v2, v1)[:, None] / (v2 @ v3.T)
-        intersect_points = hull_pos + jp.einsum("ij,ki->ikj", directions, distances)
+        intersect_points = hull_pos + jnp.einsum("ij,ki->ikj", directions, distances)
         valid_intersects = jp.array(
             [
                 (
-                    (info.terrain_points[:-1, 0] <= intersect_points[i][:, 0])
-                    & (intersect_points[i][:, 0] <= info.terrain_points[1:, 0])
+                    (env_info["terrain_points"][:-1, 0] <= intersect_points[i][:, 0])
+                    & (intersect_points[i][:, 0] <= env_info["terrain_points"][1:, 0])
                 )
                 for i in range(len(directions))
             ]
@@ -216,7 +221,7 @@ class BipedalWalker(env.Env):
         normed_min_distances = min_distances / LIDAR_RANGE
         return normed_min_distances
 
-    def _get_obs(self, qp, env_info):
+    def _get_obs(self, qp, env_info) -> Tuple[jp.ndarray, Dict]:
         left_leg_ground_contact, right_leg_ground_contact = (
             env_info["system_info"].contact.vel[(LEFT_LEG, RIGHT_LEG), 2] != 0
         ).astype(int)
@@ -226,10 +231,12 @@ class BipedalWalker(env.Env):
 
         hull_velocity = self._to_2d(0.3 * qp.vel[HULL])
 
-        obs = [
-            self._get_angle(self.qp.rot[HULL]),
-            self.qp.ang[HULL][1] / 200,
-            *self._to_2d(0.3 * self.qp.vel[HULL]),
+        lidar_detections = self._get_lidar(qp, env_info)
+
+        obs = np.array([
+            self._get_angle(qp.rot[HULL]),
+            qp.ang[HULL][1] / 200,
+            *self._to_2d(0.3 * qp.vel[HULL]),
             joint_angle[LEFT_HIP],
             joint_vel[LEFT_HIP],
             joint_angle[LEFT_KNEE],
@@ -240,8 +247,10 @@ class BipedalWalker(env.Env):
             joint_angle[RIGHT_KNEE],
             joint_vel[RIGHT_KNEE],
             right_leg_ground_contact,
-            *self._get_lidar(),
-        ]
+            *lidar_detections,
+        ])
+
+        print(obs)
 
         metrics = {
             "hull_rot": self._get_angle(qp.rot[HULL]),
@@ -258,13 +267,13 @@ class BipedalWalker(env.Env):
             "right_knee_joint_angle": joint_angle[RIGHT_KNEE],
             "right_knee_joint_velocity": joint_vel[RIGHT_KNEE],
             "right_leg_ground_contact": right_leg_ground_contact,
-            "lidar_intersects": self._get_lidar(qp),
+            "lidar_intersects": lidar_detections,
         }
         assert len(obs) == 24
         return obs, metrics
 
-    def _generate_terrain(self, hardcore):
-        terrain_x = jp.linspace(
+    def _generate_terrain(self, rng: jp.ndarray,  hardcore: bool):
+        terrain_x = jnp.linspace(
             -INITIAL_X, TERRAIN_SIZE - INITIAL_X, TERRAIN_LENGTH
         )
         velocity = 0
@@ -275,7 +284,7 @@ class BipedalWalker(env.Env):
             velocity += (
                 -0.2 * velocity
                 - 0.01 * jp.sign(y)
-                + jp.random.uniform(minval=-1, maxval=1) / TERRAIN_SCALE
+                + jp.random_uniform(rng=rng, low=-1, high=1) / TERRAIN_SCALE
             )
             y += velocity
             terrain_y.append(y)
@@ -286,7 +295,8 @@ class BipedalWalker(env.Env):
         return (terrain_x, terrain_y, terrain_points, terrain_map)
 
     def reset(self, rng: jp.ndarray) -> env.State:
-        terrain_x, terrain_y, terrain_points, terrain_map = self._generate_terrain(self.hardcore)
+        self.prev_shaping = None
+        terrain_x, terrain_y, terrain_points, terrain_map = self._generate_terrain(rng, self.hardcore)
         new_sys_conf = _SYSTEM_CONFIG(terrain_map=terrain_map)
 
         env_info = {
@@ -304,11 +314,11 @@ class BipedalWalker(env.Env):
         ]
 
         qp = self.sys.default_qp()
-        qp, info = self.sys.step(self.qp, jp.array([0, 0, 0, 0]))
+        info = self.sys.info(qp)
 
         env_info["system_info"] = info
 
-        obs, metrics = self._get_obs(qp, info)
+        obs, metrics = self._get_obs(qp, env_info)
         reward, done, zero = jp.zeros(3)
 
         env_state = env.State(
@@ -324,26 +334,20 @@ class BipedalWalker(env.Env):
 
     def step(self, state: env.State, action: jp.ndarray) -> env.State:
         prev_env_state = state
-        prev_env_info = prev_env_info.info
+        env_info = prev_env_state.info
+        print(env_info)
 
         action = jp.clip(action, -1, +1).astype(jp.float32)
         qp, info = self.sys.step(prev_env_state.qp, action)
+        env_info.update(system_info=info)
 
-        env_info = {
-            "terrain_x": prev_env_info["terrain_x"],
-            "terrain_y": prev_env_info["terrain_y"],
-            "terrain_points": prev_env_info["terrain_points"],
-            "terrain_map": prev_env_info["terrain_map"],
-            "system_info": info
-        }
-
-        obs, metrics = self._get_obs(env_info)
+        obs, metrics = self._get_obs(qp, env_info)
 
         shaping = (
-            3.5 * self.qp.pos[HULL][0]
+            3.5 * qp.pos[HULL][0]
         )  # moving forward is a way to receive reward (normalized to get 300 on completion)
         shaping -= 5.0 * abs(
-            self.state[0]
+            prev_env_state.obs[0]
         )  # keep head straight, other than that and falling, any behavior is unpunished
 
         reward = 0
@@ -362,190 +366,189 @@ class BipedalWalker(env.Env):
             reward -= 0.028 * jp.clip(jp.abs(a), 0, 1)
             # normalized to about -50.0 using heuristic, more optimal agent should spend less
 
-        return env.State(
-            qp,
-            obs,
-            reward,
-            done,
-            metrics,
-            info
+        return state.replace(
+            qp=qp,
+            obs=obs,
+            reward=reward,
+            done=done,
+            metrics=metrics,
+            info=env_info,
         )
 
-_SYSTEM_CONFIG = lambda terrain_map: """
-            dt: 0.02
-            substeps: 20
-            friction: 1.0
-            dynamics_mode: "pbd"
-            gravity { z: -10 }
-            velocity_damping: 1.0
-            bodies {
-                name: "ground"
-                colliders {
-                heightMap {
-                    size: %s
-                    data: %s
-                }
-                }
-                frozen { all: true }
+_SYSTEM_CONFIG = lambda terrain_map:  """
+        dt: 0.02
+        substeps: 20
+        friction: 1.0
+        dynamics_mode: "pbd"
+        gravity { z: -10 }
+        velocity_damping: 1.0
+        bodies {
+            name: "ground"
+            colliders {
+            heightMap {
+                size: %s
+                data: %s
             }
-            bodies {
-                name: "hull"
-                colliders { box { halfsize { x: %s y: 0.5 z: %s }}}
-                inertia { x: 1.0 y: 1000.0 z: 1.0 }
-                mass: %s
             }
-            bodies {
-                name: "left_thigh"
-                colliders {
-                box {
-                    halfsize { x: %s y: 0.2 z: %s }
-                }
-                }
-                inertia { x: 1.0 y: 1.0 z: 1.0 }
-                mass: %s
+            frozen { all: true }
+        }
+        bodies {
+            name: "hull"
+            colliders { box { halfsize { x: %s y: 0.5 z: %s }}}
+            inertia { x: 1.0 y: 1000.0 z: 1.0 }
+            mass: %s
+        }
+        bodies {
+            name: "left_thigh"
+            colliders {
+            box {
+                halfsize { x: %s y: 0.2 z: %s }
             }
-            bodies {
-                name: "right_thigh"
-                colliders {
-                box {
-                    halfsize { x: %s y: 0.2 z: %s }
-                }
-                }
-                inertia { x: 1.0 y: 1.0 z: 1.0 }
-                mass: %s
             }
-            bodies {
-                name: "left_leg"
-                colliders {
-                box {
-                    halfsize { x: %s y: 0.2 z: %s }
-                }
-                }
-                inertia { x: 1.0 y: 1.0 z: 1.0 }
-                mass: %s
+            inertia { x: 1.0 y: 1.0 z: 1.0 }
+            mass: %s
+        }
+        bodies {
+            name: "right_thigh"
+            colliders {
+            box {
+                halfsize { x: %s y: 0.2 z: %s }
             }
-            bodies {
-                name: "right_leg"
-                colliders {
-                box {
-                    halfsize { x: %s y: 0.2 z: %s }
-                }
-                }
-                inertia { x: 1.0 y: 1.0 z: 1.0 }
-                mass: %s
             }
-            joints {
-                name: "left_hip"
-                parent: "hull"
-                child: "left_thigh"
-                parent_offset { x: %s z: -%s }
-                child_offset { x: %s z: %s }
-                rotation { z: -90.0 y: 0.0 }
-                angle_limit { min: -46.0 max: 63.0 }
-                angular_damping: 1.0
+            inertia { x: 1.0 y: 1.0 z: 1.0 }
+            mass: %s
+        }
+        bodies {
+            name: "left_leg"
+            colliders {
+            box {
+                halfsize { x: %s y: 0.2 z: %s }
             }
-            joints {
-                name: "right_hip"
-                parent: "hull"
-                child: "right_thigh"
-                parent_offset { x: %s z: -%s }
-                child_offset { x: %s z: %s }
-                rotation { z: -90.0 y: 0.0 }
-                angle_limit { min: -46.0 max: 63.0 }
-                angular_damping: 1.0
             }
-            joints {
-                name: "left_knee"
-                parent: "left_thigh"
-                child: "left_leg"
-                parent_offset { z: -%s }
-                child_offset { z: %s }
-                rotation { z: -90.0 y: 0.0 }
-                angle_limit { min: -91.0 max: -5.0 }
-                angular_damping: 1.0
+            inertia { x: 1.0 y: 1.0 z: 1.0 }
+            mass: %s
+        }
+        bodies {
+            name: "right_leg"
+            colliders {
+            box {
+                halfsize { x: %s y: 0.2 z: %s }
             }
-            joints {
-                name: "right_knee"
-                parent: "right_thigh"
-                child: "right_leg"
-                parent_offset { z: -%s }
-                child_offset { z: %s }
-                rotation { z: -90.0 y: 0.0 }
-                angle_limit { min: -91.0 max: -5.0 }
-                angular_damping: 1.0
             }
-            actuators {
-                name: "left_hip"
-                joint: "left_hip"
-                strength: %s
-                torque {}
-            }
-            actuators {
-                name: "left_knee"
-                joint: "left_knee"
-                strength: %s
-                torque {}
-            }
-            actuators {
-                name: "right_hip"
-                joint: "right_hip"
-                strength: %s
-                torque {}
-            }
-            actuators {
-                name: "right_knee"
-                joint: "right_knee"
-                strength: %s
-                torque {}
-            }
-            frozen {
-                position { y: 1.0 }
-                rotation { x: 1.0 z: 1.0 }
-            }
-            defaults {
-                qps { name: "ground" pos { x: -%s y: %s z: 0 }}
-                angles { name: "left_hip" angle { x: -20.0 } }
-                angles { name: "right_hip" angle { x: 25.0 } }
-                angles { name: "left_knee" angle { x: -40.0 } }
-                angles { name: "right_knee" angle { x: -65.0 } }
-            }
-        """ % (
-            TERRAIN_SIZE,
-            terrain_map,
-            HULL_X,
-            HULL_Z,
-            HULL_MASS,
-            THIGH_X,
-            THIGH_Z,
-            LIMB_MASS,
-            THIGH_X,
-            THIGH_Z,
-            LIMB_MASS,
-            LEG_X,
-            LEG_Z,
-            LIMB_MASS,
-            LEG_X,
-            LEG_Z,
-            LIMB_MASS,
-            HIP_OFFSET_X,
-            HULL_Z,
-            -HIP_OFFSET_X,
-            THIGH_Z,
-            HIP_OFFSET_X,
-            HULL_Z,
-            -HIP_OFFSET_X,
-            THIGH_Z,
-            THIGH_Z,
-            LEG_Z,
-            THIGH_Z,
-            LEG_Z,
-            STRENGTH_HIP,
-            STRENGTH_KNEE,
-            STRENGTH_HIP,
-            STRENGTH_KNEE,
-            INITIAL_X,
-            TERRAIN_SIZE / 2,
-        )
+            inertia { x: 1.0 y: 1.0 z: 1.0 }
+            mass: %s
+        }
+        joints {
+            name: "left_hip"
+            parent: "hull"
+            child: "left_thigh"
+            parent_offset { x: %s z: -%s }
+            child_offset { x: %s z: %s }
+            rotation { z: -90.0 y: 0.0 }
+            angle_limit { min: -46.0 max: 63.0 }
+            angular_damping: 1.0
+        }
+        joints {
+            name: "right_hip"
+            parent: "hull"
+            child: "right_thigh"
+            parent_offset { x: %s z: -%s }
+            child_offset { x: %s z: %s }
+            rotation { z: -90.0 y: 0.0 }
+            angle_limit { min: -46.0 max: 63.0 }
+            angular_damping: 1.0
+        }
+        joints {
+            name: "left_knee"
+            parent: "left_thigh"
+            child: "left_leg"
+            parent_offset { z: -%s }
+            child_offset { z: %s }
+            rotation { z: -90.0 y: 0.0 }
+            angle_limit { min: -91.0 max: -5.0 }
+            angular_damping: 1.0
+        }
+        joints {
+            name: "right_knee"
+            parent: "right_thigh"
+            child: "right_leg"
+            parent_offset { z: -%s }
+            child_offset { z: %s }
+            rotation { z: -90.0 y: 0.0 }
+            angle_limit { min: -91.0 max: -5.0 }
+            angular_damping: 1.0
+        }
+        actuators {
+            name: "left_hip"
+            joint: "left_hip"
+            strength: %s
+            torque {}
+        }
+        actuators {
+            name: "left_knee"
+            joint: "left_knee"
+            strength: %s
+            torque {}
+        }
+        actuators {
+            name: "right_hip"
+            joint: "right_hip"
+            strength: %s
+            torque {}
+        }
+        actuators {
+            name: "right_knee"
+            joint: "right_knee"
+            strength: %s
+            torque {}
+        }
+        frozen {
+            position { y: 1.0 }
+            rotation { x: 1.0 z: 1.0 }
+        }
+        defaults {
+            qps { name: "ground" pos { x: -%s y: %s z: 0 }}
+            angles { name: "left_hip" angle { x: -20.0 } }
+            angles { name: "right_hip" angle { x: 25.0 } }
+            angles { name: "left_knee" angle { x: -40.0 } }
+            angles { name: "right_knee" angle { x: -65.0 } }
+        }
+    """ % (
+        TERRAIN_SIZE,
+        terrain_map,
+        HULL_X,
+        HULL_Z,
+        HULL_MASS,
+        THIGH_X,
+        THIGH_Z,
+        LIMB_MASS,
+        THIGH_X,
+        THIGH_Z,
+        LIMB_MASS,
+        LEG_X,
+        LEG_Z,
+        LIMB_MASS,
+        LEG_X,
+        LEG_Z,
+        LIMB_MASS,
+        HIP_OFFSET_X,
+        HULL_Z,
+        -HIP_OFFSET_X,
+        THIGH_Z,
+        HIP_OFFSET_X,
+        HULL_Z,
+        -HIP_OFFSET_X,
+        THIGH_Z,
+        THIGH_Z,
+        LEG_Z,
+        THIGH_Z,
+        LEG_Z,
+        STRENGTH_HIP,
+        STRENGTH_KNEE,
+        STRENGTH_HIP,
+        STRENGTH_KNEE,
+        INITIAL_X,
+        TERRAIN_SIZE / 2,)
 
 if __name__ == "__main__":
     # Heurisic: suboptimal, have no notion of balance.
