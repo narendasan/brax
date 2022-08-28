@@ -233,7 +233,7 @@ class BipedalWalker(env.Env):
 
         lidar_detections = self._get_lidar(qp, env_info)
 
-        obs = np.array([
+        obs = jnp.array([
             self._get_angle(qp.rot[HULL]),
             qp.ang[HULL][1] / 200,
             *self._to_2d(0.3 * qp.vel[HULL]),
@@ -249,8 +249,6 @@ class BipedalWalker(env.Env):
             right_leg_ground_contact,
             *lidar_detections,
         ])
-
-        print(obs)
 
         metrics = {
             "hull_rot": self._get_angle(qp.rot[HULL]),
@@ -270,6 +268,7 @@ class BipedalWalker(env.Env):
             "lidar_intersects": lidar_detections,
         }
         assert len(obs) == 24
+        print(type(obs), type(metrics))
         return obs, metrics
 
     def _generate_terrain(self, rng: jp.ndarray,  hardcore: bool):
@@ -297,6 +296,7 @@ class BipedalWalker(env.Env):
     def reset(self, rng: jp.ndarray) -> env.State:
         self.prev_shaping = None
         terrain_x, terrain_y, terrain_points, terrain_map = self._generate_terrain(rng, self.hardcore)
+        print(terrain_map)
         new_sys_conf = _SYSTEM_CONFIG(terrain_map=terrain_map)
 
         env_info = {
@@ -335,7 +335,6 @@ class BipedalWalker(env.Env):
     def step(self, state: env.State, action: jp.ndarray) -> env.State:
         prev_env_state = state
         env_info = prev_env_state.info
-        print(env_info)
 
         action = jp.clip(action, -1, +1).astype(jp.float32)
         qp, info = self.sys.step(prev_env_state.qp, action)
@@ -385,10 +384,10 @@ _SYSTEM_CONFIG = lambda terrain_map:  """
         bodies {
             name: "ground"
             colliders {
-            heightMap {
-                size: %s
-                data: %s
-            }
+                heightMap {
+                    size: %s
+                    data: %s
+                }
             }
             frozen { all: true }
         }
