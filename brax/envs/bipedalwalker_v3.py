@@ -226,7 +226,7 @@ class BipedalWalker(env.Env):
             env_info["system_info"].contact.vel[(LEFT_LEG, RIGHT_LEG), 2] != 0
         ).astype(int)
         joint_angle, joint_vel = self.sys.joints[0].angle_vel(qp)
-        joint_angle += [0, 1, 0, 1]
+        joint_angle += jp.array([0, 1, 0, 1]) # SHOULD THIS BE APPEND OR ADD?
         joint_vel /= jp.array([6, 4, 6, 4])
 
         hull_velocity = self._to_2d(0.3 * qp.vel[HULL])
@@ -296,7 +296,6 @@ class BipedalWalker(env.Env):
     def reset(self, rng: jp.ndarray) -> env.State:
         self.prev_shaping = None
         terrain_x, terrain_y, terrain_points, terrain_map = self._generate_terrain(rng, self.hardcore)
-        print(terrain_map)
         new_sys_conf = _SYSTEM_CONFIG(terrain_map=terrain_map)
 
         env_info = {
@@ -355,11 +354,11 @@ class BipedalWalker(env.Env):
         self.prev_shaping = shaping
 
         done = False
-        if qp.pos[HULL][0] < -INITIAL_X / 2 or info.contact.vel[HULL, 2] != 0:
-            reward = -100
-            done = True
-        if qp.pos[HULL][0] > TERRAIN_SIZE - INITIAL_X:
-            done = True
+        #if qp.pos[HULL][0] < -INITIAL_X / 2 or info.contact.vel[HULL, 2] != 0:
+        #    reward = -100
+        #    done = True
+        #if qp.pos[HULL][0] > TERRAIN_SIZE - INITIAL_X:
+        #    done = True
 
         for a in action:
             reward -= 0.028 * jp.clip(jp.abs(a), 0, 1)
